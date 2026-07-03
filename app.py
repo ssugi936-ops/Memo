@@ -1,10 +1,10 @@
 """Todo 관리 앱 (Streamlit 버전)
 
-원본은 HTML/CSS/Vanilla JS + Local Storage로 만든 앱이며,
-이 파일은 동일한 기능(추가/수정/삭제/완료/카테고리/필터/진행률)을
-Streamlit으로 옮긴 버전이다. 브라우저 Local Storage 대신, 서버 쪽
-JSON 파일(todos.json, settings.json)에 저장해 새로고침·앱 재시작
-후에도 Todo 목록과 마지막 선택 카테고리가 유지되도록 한다.
+원본은 HTML/CSS/Vanilla JS + Local Storage로 만든 앱이며, 이 파일은
+동일한 기능(추가/수정/삭제/완료/카테고리/필터/진행률)에 키워드 기반
+자동 카테고리 분류 기능을 더해 Streamlit으로 옮긴 버전이다. 브라우저
+Local Storage 대신 서버 쪽 JSON 파일(todos.json, settings.json)에
+저장해 새로고침·앱 재시작 후에도 Todo 목록과 설정이 유지되도록 한다.
 """
 
 import html
@@ -16,12 +16,35 @@ import streamlit as st
 
 DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "todos.json")
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
+
 CATEGORIES = ["업무", "개인", "공부"]
 CATEGORY_COLORS = {
     "업무": "#3b82f6",
     "개인": "#22b06f",
     "공부": "#f5a623",
 }
+
+# 카테고리별 분류 키워드. 할 일 텍스트에 이 단어가 포함되어 있으면
+# 해당 카테고리로 자동 분류한다. (단순 키워드 매칭 방식)
+CATEGORY_KEYWORDS = {
+    "업무": [
+        "회의", "미팅", "보고서", "발표", "프로젝트", "업무", "이메일", "메일",
+        "계약", "출장", "회사", "클라이언트", "고객", "마감", "기획", "결재",
+        "면접", "출근", "퇴근", "품의", "리포트", "세미나", "회식", "사업",
+    ],
+    "개인": [
+        "운동", "헬스", "병원", "약속", "가족", "친구", "여행", "쇼핑",
+        "장보기", "청소", "빨래", "생일", "데이트", "취미", "산책", "요리",
+        "은행", "공과금", "관리비", "약국", "미용실", "강아지", "고양이", "반려동물",
+    ],
+    "공부": [
+        "공부", "시험", "과제", "강의", "수업", "독서", "책", "논문",
+        "학습", "복습", "예습", "자격증", "토익", "토플", "스터디", "강좌",
+        "인강", "필기", "암기", "문제집", "학원",
+    ],
+}
+
+DEFAULT_SETTINGS = {"last_category": CATEGORIES[0], "auto_classify": True}
 
 st.set_page_config(page_title="Todo 관리", page_icon="✅", layout="centered")
 
@@ -61,24 +84,47 @@ def save_todos(todos):
         json.dump(todos, f, ensure_ascii=False, indent=2)
 
 
-def load_last_category():
-    """마지막으로 선택한 카테고리를 불러온다. 앱을 껐다 켜도 유지되도록 파일에 저장한다."""
+def load_settings():
+    """마지막 선택 카테고리, 자동 분류 사용 여부 등 사용자 설정을 불러온다."""
     if not os.path.exists(SETTINGS_FILE):
-        return CATEGORIES[0]
+        return dict(DEFAULT_SETTINGS)
 
     try:
         with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-            settings = json.load(f)
+            data = json.load(f)
     except (OSError, json.JSONDecodeError):
-        return CATEGORIES[0]
+        return dict(DEFAULT_SETTINGS)
 
-    category = settings.get("last_category") if isinstance(settings, dict) else None
-    return category if category in CATEGORIES else CATEGORIES[0]
+    if not isinstance(data, dict):
+        return dict(DEFAULT_SETTINGS)
+
+    return {
+        "last_category": data.get("last_category") if data.get("last_category") in CATEGORIES else CATEGORIES[0],
+        "auto_classify": bool(data.get("auto_classify", True)),
+    }
 
 
-def save_last_category(category):
+def save_settings(settings):
     with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-        json.dump({"last_category": category}, f, ensure_ascii=False, indent=2)
+        json.dump(settings, f, ensure_ascii=False, indent=2)
+
+
+# ==============================================================================
+# 키워드 기반 자동 카테고리 분류
+# ==============================================================================
+def classify_category(text):
+    """텍스트에 포함된 카테고리별 키워드 개수를 세어 가장 잘 맞는 카테고리를 추측한다.
+    일치하는 키워드가 하나도 없으면 None을 반환한다."""
+    lowered = text.lower()
+    scores = {category: 0 for category in CATEGORIES}
+
+    for category, keywords in CATEGORY_KEYWORDS.items():
+        for keyword in keywords:
+            if keyword.lower() in lowered:
+                scores[category] += 1
+
+    best_category = max(scores, key=scores.get)
+    return best_category if scores[best_category] > 0 else None
 
 
 # ==============================================================================
@@ -90,8 +136,8 @@ if "editing_id" not in st.session_state:
     st.session_state.editing_id = None
 if "filter" not in st.session_state:
     st.session_state.filter = "전체"
-if "last_category" not in st.session_state:
-    st.session_state.last_category = load_last_category()
+if "settings" not in st.session_state:
+    st.session_state.settings = load_settings()
 
 
 # ==============================================================================
@@ -147,23 +193,58 @@ st.markdown("<h1 style='text-align:center;'>Todo 관리</h1>", unsafe_allow_html
 # ==============================================================================
 # Todo 입력 영역
 # ==============================================================================
+# 폼 바깥에 두어 토글하는 즉시(리런 즉시) 화면 구성이 바뀌도록 한다.
+auto_classify = st.checkbox(
+    "🤖 입력한 내용을 분석해 카테고리 자동 분류",
+    value=st.session_state.settings["auto_classify"],
+)
+if auto_classify != st.session_state.settings["auto_classify"]:
+    st.session_state.settings["auto_classify"] = auto_classify
+    save_settings(st.session_state.settings)
+
+manual_category = None
 with st.form("add_todo_form", clear_on_submit=True):
     input_col, category_col, button_col = st.columns([3, 1, 1])
+
     new_text = input_col.text_input(
         "할 일", placeholder="할 일을 입력하세요", label_visibility="collapsed"
     )
-    new_category = category_col.selectbox(
-        "카테고리",
-        CATEGORIES,
-        index=CATEGORIES.index(st.session_state.last_category),
-        label_visibility="collapsed",
-    )
+
+    if auto_classify:
+        category_col.markdown(
+            "<div style='padding-top:8px;color:#8a8f98;font-size:0.85rem;"
+            "text-align:center;'>🤖 자동</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        manual_category = category_col.selectbox(
+            "카테고리",
+            CATEGORIES,
+            index=CATEGORIES.index(st.session_state.settings["last_category"]),
+            label_visibility="collapsed",
+        )
+
     submitted = button_col.form_submit_button("추가", use_container_width=True)
 
 if submitted:
-    add_todo(new_text, new_category)
-    st.session_state.last_category = new_category
-    save_last_category(new_category)
+    predicted = None
+    if auto_classify:
+        predicted = classify_category(new_text)
+        category_to_use = predicted or st.session_state.settings["last_category"]
+    else:
+        category_to_use = manual_category
+
+    add_todo(new_text, category_to_use)
+
+    if new_text.strip():
+        st.session_state.settings["last_category"] = category_to_use
+        save_settings(st.session_state.settings)
+        if auto_classify:
+            if predicted:
+                st.toast(f"'{category_to_use}' 카테고리로 자동 분류되었습니다.")
+            else:
+                st.toast(f"일치하는 키워드가 없어 '{category_to_use}' 카테고리로 지정했습니다.")
+
     st.rerun()
 
 # ==============================================================================
